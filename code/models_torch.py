@@ -9,11 +9,17 @@ of not writing separate code per architecture.
 
 Input to the network is a 2-D spectrogram stored as a flat vector (shape: N, D).
 Internally each batch is reshaped to (N, 1, F, T) for convolution.
+
+AdaptiveAvgPool2d is applied after the conv stack to collapse the spatial
+dimensions to a fixed pool_size before the FC layers. Without it the FC
+input would be hundreds of thousands of values and the CNNs would have more
+parameters than the MLPs, defeating the purpose. The decoder mirrors this
+with nn.Upsample before the ConvTranspose stack.
 """
 
 import torch
 import torch.nn as nn
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 
 class ConvAutoencoder(nn.Module):
@@ -27,8 +33,8 @@ class ConvAutoencoder(nn.Module):
         Number of output channels for each conv layer in the encoder.
         len == 1 -> Model 3, len == 2 -> Model 4.
     fc_dims : list of int
-        Hidden FC dimensions between the flattened conv output and the
-        bottleneck. len == 1 -> Model 3, len == 2 -> Model 4.
+        Hidden FC dimensions between the pooled conv output and the bottleneck.
+        len == 1 -> Model 3, len == 2 -> Model 4.
     bottleneck_dim : int
         Size of the latent code.
     activation : str
@@ -37,6 +43,10 @@ class ConvAutoencoder(nn.Module):
         Convolution kernel size (same for all layers).
     stride : int
         Convolution stride (controls spatial downsampling in encoder).
+    pool_size : (int, int) or None
+        Target spatial size after AdaptiveAvgPool2d in the encoder.
+        Keeps FC parameter count independent of input resolution.
+        The decoder uses nn.Upsample to reverse this before ConvTranspose.
     """
 
     def __init__(
@@ -48,15 +58,16 @@ class ConvAutoencoder(nn.Module):
         activation: str = "relu",
         kernel_size: int = 3,
         stride: int = 2,
+        pool_size: Optional[Tuple[int, int]] = (4, 4),
     ):
         super().__init__()
 
-        self.input_shape   = input_shape
-        self.conv_channels = conv_channels
-        self.fc_dims       = fc_dims
+        self.input_shape    = input_shape
+        self.conv_channels  = conv_channels
+        self.fc_dims        = fc_dims
         self.bottleneck_dim = bottleneck_dim
-        self.kernel_size   = kernel_size
-        self.stride        = stride
+        self.kernel_size    = kernel_size
+        self.stride         = stride
 
         _acts = {"relu": nn.ReLU, "tanh": nn.Tanh, "sigmoid": nn.Sigmoid}
         Act = _acts[activation]
@@ -72,12 +83,25 @@ class ConvAutoencoder(nn.Module):
             in_ch = out_ch
         self.enc_conv = nn.Sequential(*enc_conv_layers)
 
-        # Compute the flattened size after conv stack by doing a dry run
+        # Pool to a fixed spatial size so FC input dim is independent of resolution.
+        # Without this, FC(flatten -> fc_dims[0]) would be huge for large spectrograms.
+        self.enc_pool = nn.AdaptiveAvgPool2d(pool_size) if pool_size else nn.Identity()
+
+        # Compute shapes via a dry run (no gradients needed)
         with torch.no_grad():
             dummy = torch.zeros(1, 1, *input_shape)
-            conv_out = self.enc_conv(dummy)
-            self.conv_out_shape = conv_out.shape[1:]   # (C, H, W)
-            flat_dim = conv_out.numel()
+            conv_out  = self.enc_conv(dummy)
+            self.pre_pool_shape = conv_out.shape[1:]      # (C, H_conv, W_conv)
+            pooled    = self.enc_pool(conv_out)
+            self.conv_out_shape = pooled.shape[1:]        # (C, pool_h, pool_w)
+            flat_dim  = pooled.numel()
+
+        # Mirror the pool with an upsample in the decoder
+        if pool_size:
+            spatial = (self.pre_pool_shape[1], self.pre_pool_shape[2])
+            self.dec_upsample: nn.Module = nn.Upsample(size=spatial, mode="bilinear", align_corners=False)
+        else:
+            self.dec_upsample = nn.Identity()
 
         # ── Encoder FC stack ──────────────────────────────────────────────────
         enc_fc_layers: List[nn.Module] = []
@@ -103,8 +127,8 @@ class ConvAutoencoder(nn.Module):
         dec_conv_layers: List[nn.Module] = []
         n_conv = len(conv_channels)
         for i in range(n_conv - 1, -1, -1):
-            in_ch  = all_channels[i + 1]   # channel coming in (deeper side)
-            out_ch = all_channels[i]        # channel going out (shallower side)
+            in_ch  = all_channels[i + 1]
+            out_ch = all_channels[i]
             is_last = (i == 0)
             dec_conv_layers.append(
                 nn.ConvTranspose2d(
@@ -123,6 +147,7 @@ class ConvAutoencoder(nn.Module):
         N = x.size(0)
         h = x.view(N, 1, *self.input_shape)
         h = self.enc_conv(h)
+        h = self.enc_pool(h)
         h = h.view(N, -1)
         return self.enc_fc(h)
 
@@ -131,8 +156,9 @@ class ConvAutoencoder(nn.Module):
         N = z.size(0)
         h = self.dec_fc(z)
         h = h.view(N, *self.conv_out_shape)
+        h = self.dec_upsample(h)                              # restore conv spatial dims
         h = self.dec_conv(h)
-        # Crop or pad to exactly match input_shape (ConvTranspose2d can be off by 1)
+        # Crop to exactly input_shape (ConvTranspose2d can be off by 1)
         h = h[:, :, : self.input_shape[0], : self.input_shape[1]]
         return h.reshape(N, -1)
 
