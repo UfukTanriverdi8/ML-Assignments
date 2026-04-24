@@ -3,7 +3,7 @@
 from pathlib import Path
 
 # ── Reproducibility ──────────────────────────────────────────────────────────
-SEED = 42
+SEED = 810
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
