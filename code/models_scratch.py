@@ -119,6 +119,7 @@ class NumpyAutoencoder:
         bottleneck_dim: int,
         activation: str = "relu",
         lr: float = 0.01,
+        grad_clip: float = 1.0,
         seed: int = 42,
     ):
         self.input_dim     = input_dim
@@ -126,6 +127,7 @@ class NumpyAutoencoder:
         self.bottleneck_dim = bottleneck_dim
         self.activation    = activation
         self.lr            = lr
+        self.grad_clip     = grad_clip
 
         act_fn, act_grad = _ACTIVATIONS[activation]
         self._act    = act_fn
@@ -262,6 +264,8 @@ class NumpyAutoencoder:
             dWs, dbs = self._backward(pre_acts, post_acts)
 
             for l in range(self.n_layers):
+                dWs[l] = np.clip(dWs[l], -self.grad_clip, self.grad_clip)
+                dbs[l] = np.clip(dbs[l], -self.grad_clip, self.grad_clip)
                 self.Ws[l] -= self.lr * dWs[l]
                 self.bs[l] -= self.lr * dbs[l]
 
