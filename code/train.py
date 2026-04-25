@@ -22,6 +22,7 @@ def train_numpy(
     X_train: np.ndarray,
     epochs: int,
     batch_size: int,
+    lr_decay: float = 1.0,
     seed: int = 42,
     verbose: bool = True,
 ) -> Dict[str, Any]:
@@ -49,6 +50,7 @@ def train_numpy(
         history["train_loss"].append(loss)
         if verbose:
             iterator.set_postfix(loss=f"{loss:.4f}")
+        model.lr *= lr_decay  # no-op when lr_decay=1.0
 
     return history
 
@@ -62,6 +64,7 @@ def train_torch(
     batch_size: int,
     lr: float,
     loss_fn: str = "mse",
+    lr_decay: float = 1.0,
     device: Optional[torch.device] = None,
     seed: int = 42,
     verbose: bool = True,
@@ -91,6 +94,7 @@ def train_torch(
 
     criterion = nn.MSELoss() if loss_fn == "mse" else nn.BCEWithLogitsLoss()
     optimiser = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimiser, gamma=lr_decay)
 
     X_tensor = torch.tensor(X_train, dtype=torch.float32)
     dataset  = TensorDataset(X_tensor)
@@ -115,6 +119,7 @@ def train_torch(
 
         mean_loss = epoch_loss / n_batches
         history["train_loss"].append(mean_loss)
+        scheduler.step()  # no-op when lr_decay=1.0 (gamma=1.0 multiplies by 1)
         if verbose:
             iterator.set_postfix(loss=f"{mean_loss:.4f}")
 
