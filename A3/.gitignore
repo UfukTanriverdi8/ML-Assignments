@@ -14,3 +14,6 @@ cache/
 checkpoints/
 figures/
 .ipynb_checkpoints/
+
+# Archive files
+*.zip
